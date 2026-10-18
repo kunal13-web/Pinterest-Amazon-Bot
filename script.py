@@ -83,60 +83,71 @@ def wrap(draw, text, fnt, max_width):
     return lines
 
 
-def _pick(items, seed):
-    return items[int(hashlib.md5(seed.encode()).hexdigest(), 16) % len(items)]
-
-
 def _download(url):
     return Image.open(io.BytesIO(requests.get(url, timeout=60).content)).convert("RGB")
 
 
-def fetch_photo(query, seed):
-    """Download a portrait stock photo. Returns (PIL image, credit) or (None, '').
+def _seed_int(seed):
+    return int(hashlib.md5(seed.encode()).hexdigest(), 16)
 
+
+def fetch_photos(query, seed, n=1, ids=None):
+    """Download n portrait stock photos. Returns (list of PIL images, list of credits).
+
+    ids: optional list of Pixabay photo IDs to use instead of searching.
     Uses Pixabay if PIXABAY_API_KEY is set, otherwise Pexels if PEXELS_API_KEY is set.
     """
-    if not query or not (PIXABAY_KEY or PEXELS_KEY):
-        return None, ""
+    if not (PIXABAY_KEY or PEXELS_KEY) or not (query or ids):
+        return [], []
+    photos, credits = [], []
     try:
         if PIXABAY_KEY:
+            hits = []
+            if ids:
+                for pid in ids:
+                    r = requests.get("https://pixabay.com/api/", params={"key": PIXABAY_KEY, "id": pid}, timeout=30)
+                    r.raise_for_status()
+                    hits += r.json().get("hits", [])
+            else:
+                r = requests.get(
+                    "https://pixabay.com/api/",
+                    params={
+                        "key": PIXABAY_KEY,
+                        "q": query[:100],
+                        "image_type": "photo",
+                        "orientation": "vertical",
+                        "min_height": 1200,
+                        "safesearch": "true",
+                        "per_page": 30,
+                    },
+                    timeout=30,
+                )
+                r.raise_for_status()
+                found = r.json().get("hits", [])
+                start = _seed_int(seed) % max(len(found), 1)
+                hits = [found[(start + i * 3) % len(found)] for i in range(min(n, len(found)))] if found else []
+            for p in hits[:n]:
+                photos.append(_download(p["largeImageURL"]))
+                credits.append(f"Photo by {p.get('user', 'unknown')} on Pixabay")
+        else:
             r = requests.get(
-                "https://pixabay.com/api/",
-                params={
-                    "key": PIXABAY_KEY,
-                    "q": query[:100],
-                    "image_type": "photo",
-                    "orientation": "vertical",
-                    "min_height": 1200,
-                    "safesearch": "true",
-                    "per_page": 20,
-                },
+                "https://api.pexels.com/v1/search",
+                headers={"Authorization": PEXELS_KEY},
+                params={"query": query, "orientation": "portrait", "size": "large", "per_page": 30},
                 timeout=30,
             )
             r.raise_for_status()
-            hits = r.json().get("hits", [])
-            if not hits:
-                print(f"no Pixabay photos for {query!r}")
-                return None, ""
-            p = _pick(hits, seed)
-            return _download(p["largeImageURL"]), f"Photo by {p.get('user', 'unknown')} on Pixabay"
-        r = requests.get(
-            "https://api.pexels.com/v1/search",
-            headers={"Authorization": PEXELS_KEY},
-            params={"query": query, "orientation": "portrait", "size": "large", "per_page": 15},
-            timeout=30,
-        )
-        r.raise_for_status()
-        photos = r.json().get("photos", [])
+            found = r.json().get("photos", [])
+            start = _seed_int(seed) % max(len(found), 1)
+            for i in range(min(n, len(found))):
+                p = found[(start + i * 3) % len(found)]
+                photos.append(_download(p["src"].get("large2x") or p["src"]["original"]))
+                credits.append(f"Photo by {p.get('photographer', 'unknown')} on Pexels")
         if not photos:
-            print(f"no Pexels photos for {query!r}")
-            return None, ""
-        p = _pick(photos, seed)
-        url = p["src"].get("large2x") or p["src"]["original"]
-        return _download(url), f"Photo by {p.get('photographer', 'unknown')} on Pexels"
+            print(f"no photos found for {query!r}")
     except Exception as e:
         print(f"photo fetch failed for {query!r}: {e}")
-        return None, ""
+    return photos, credits
 
 
 def cover(img, w, h):
@@ -146,49 +157,150 @@ def cover(img, w, h):
     return img.crop((left, top, left + w, top + h))
 
 
-def build_image(row, asin):
-    panel_bg, text_col, accent = PALETTES.get(row.get("category", "").strip().lower(), DEFAULT_PALETTE)
-    query = (row.get("image_query") or "").strip() or (row.get("keywords", "").split(",")[0].strip())
-    photo, credit = fetch_photo(query, asin)
-    if photo is None:  # fallback: plain colour background so the bot never stops
-        photo = Image.new("RGB", (W, H), accent)
-    img = cover(photo, W, H)
+def fit_text(d, text, path, max_w, max_h, start=76, minimum=44, max_lines=5):
+    size = start
+    while True:
+        f = font(path, size)
+        lines = wrap(d, text, f, max_w)
+        step = int(size * 1.22)
+        if (len(lines) <= max_lines and len(lines) * step <= max_h) or size <= minimum:
+            return f, lines[:max_lines], step
+        size -= 4
 
-    # bottom shade so the button and disclosure stay readable on any photo
-    shade = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+
+def bottom_shade(img, height=380, strength=190):
+    shade = Image.new("RGBA", img.size, (0, 0, 0, 0))
     sd = ImageDraw.Draw(shade)
-    for i in range(380):
-        sd.line([(0, H - 380 + i), (W, H - 380 + i)], fill=(0, 0, 0, int(190 * i / 380)))
-    img = Image.alpha_composite(img.convert("RGBA"), shade).convert("RGB")
-    d = ImageDraw.Draw(img)
+    for i in range(height):
+        sd.line([(0, H - height + i), (W, H - height + i)], fill=(0, 0, 0, int(strength * i / height)))
+    return Image.alpha_composite(img.convert("RGBA"), shade).convert("RGB")
 
-    # top headline panel
+
+def draw_cta(d, y, fill, text_col, label="SHOP THE LOOK ON AMAZON", pad=70):
+    d.rounded_rectangle([pad, y, W - pad, y + 104], radius=52, fill=fill)
+    f = font(FONT_BOLD, 42)
+    while d.textlength(label, font=f) > W - 2 * pad - 40:
+        f = font(FONT_BOLD, f.size - 2)
+    d.text(((W - d.textlength(label, font=f)) / 2, y + 52 - f.size / 2 - 4), label, font=f, fill=text_col)
+    small = font(FONT_REG, 25)
+    note = "#ad  As an Amazon Associate I earn from qualifying purchases"
+    d.text(((W - d.textlength(note, font=small)) / 2, y + 136), note, font=small, fill=(235, 235, 235))
+
+
+def centered(d, lines, f, step, y, fill):
+    for line in lines:
+        d.text(((W - d.textlength(line, font=f)) / 2, y), line, font=f, fill=fill)
+        y += step
+    return y
+
+
+def layout_panel(photos, row, pal):
+    """Headline panel on top, one photo below."""
+    panel_bg, text_col, accent = pal
+    img = bottom_shade(cover(photos[0], W, H))
+    d = ImageDraw.Draw(img)
     pad = 70
-    title_font = font(FONT_SERIF, 70)
-    lines = wrap(d, row["headline"].strip(), title_font, W - 2 * pad)[:4]
-    panel_h = 60 + 44 + len(lines) * 90 + 50
+    f, lines, step = fit_text(d, row["headline"].strip(), FONT_SERIF, W - 2 * pad, 4 * 90, start=70, max_lines=4)
+    panel_h = 60 + 44 + len(lines) * step + 50
     d.rectangle([0, 0, W, panel_h], fill=panel_bg)
     d.text((pad, 52), "STYLENEST", font=font(FONT_BOLD, 28), fill=accent)
     d.line([(pad, 96), (pad + 90, 96)], fill=accent, width=4)
     y = 124
     for line in lines:
-        d.text((pad, y), line, font=title_font, fill=text_col)
-        y += 90
+        d.text((pad, y), line, font=f, fill=text_col)
+        y += step
+    draw_cta(d, H - 250, panel_bg, text_col)
+    return img
 
-    # call to action
-    btn_y = H - 250
-    d.rounded_rectangle([pad, btn_y, W - pad, btn_y + 104], radius=52, fill=panel_bg)
-    btn_font = font(FONT_BOLD, 42)
-    label = "SHOP THE LOOK ON AMAZON"
-    while d.textlength(label, font=btn_font) > W - 2 * pad - 40:
-        btn_font = font(FONT_BOLD, btn_font.size - 2)
-    tw = d.textlength(label, font=btn_font)
-    d.text(((W - tw) / 2, btn_y + 52 - btn_font.size / 2 - 4), label, font=btn_font, fill=text_col)
 
-    small = font(FONT_REG, 25)
-    note = "#ad  As an Amazon Associate I earn from qualifying purchases"
-    d.text(((W - d.textlength(note, font=small)) / 2, H - 112), note, font=small, fill=(235, 235, 235))
-    return img, credit
+def layout_card(photos, row, pal):
+    """Full-bleed photo with a centred headline card."""
+    panel_bg, text_col, accent = pal
+    img = bottom_shade(cover(photos[0], W, H))
+    d = ImageDraw.Draw(img)
+    f, lines, step = fit_text(d, row["headline"].strip(), FONT_SERIF, 700, 5 * 84, start=68, max_lines=5)
+    card_h = 110 + len(lines) * step + 70
+    top = 330
+    card = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(card).rounded_rectangle([110, top, W - 110, top + card_h], radius=36, fill=panel_bg + (238,))
+    img = Image.alpha_composite(img.convert("RGBA"), card).convert("RGB")
+    d = ImageDraw.Draw(img)
+    lab = "STYLENEST"
+    lf = font(FONT_BOLD, 26)
+    d.text(((W - d.textlength(lab, font=lf)) / 2, top + 40), lab, font=lf, fill=accent)
+    d.line([(W / 2 - 45, top + 82), (W / 2 + 45, top + 82)], fill=accent, width=4)
+    centered(d, lines, f, step, top + 110, text_col)
+    draw_cta(d, H - 250, panel_bg, text_col)
+    return img
+
+
+def layout_collage(photos, row, pal):
+    """Three-photo collage under a centred headline, accent footer."""
+    panel_bg, text_col, accent = pal
+    img = Image.new("RGB", (W, H), panel_bg)
+    d = ImageDraw.Draw(img)
+    pad = 60
+    f, lines, step = fit_text(d, row["headline"].strip(), FONT_SERIF, W - 2 * pad, 4 * 80, start=64, max_lines=4)
+    lf = font(FONT_BOLD, 26)
+    d.text(((W - d.textlength("STYLENEST", font=lf)) / 2, 46), "STYLENEST", font=lf, fill=accent)
+    y = centered(d, lines, f, step, 92, text_col)
+    top, bottom, g = y + 24, H - 250, 12
+    big_w = 560
+    img.paste(cover(photos[0], big_w, bottom - top), (0, top))
+    half = (bottom - top - g) // 2
+    img.paste(cover(photos[1], W - big_w - g, half), (big_w + g, top))
+    img.paste(cover(photos[2], W - big_w - g, bottom - top - g - half), (big_w + g, top + half + g))
+    d.rectangle([0, bottom, W, H], fill=accent)
+    draw_cta(d, bottom + 30, panel_bg, text_col)
+    return img
+
+
+def layout_banner(photos, row, pal):
+    """Full-bleed photo, coloured headline banner low on the page, optional badge."""
+    panel_bg, text_col, accent = pal
+    img = bottom_shade(cover(photos[0], W, H), height=300)
+    d = ImageDraw.Draw(img)
+    pad = 70
+    f, lines, step = fit_text(d, row["headline"].strip(), FONT_SERIF, W - 2 * pad - 20, 4 * 84, start=68, max_lines=4)
+    band_h = 40 + len(lines) * step + 40
+    band_top = H - 300 - band_h
+    d.rectangle([0, band_top, W, band_top + band_h], fill=accent)
+    centered(d, lines, f, step, band_top + 34, panel_bg)
+    lf = font(FONT_BOLD, 26)
+    d.text(((W - d.textlength("STYLENEST", font=lf)) / 2, 60), "STYLENEST", font=lf, fill="white")
+    badge = (row.get("badge") or "").strip().upper()
+    if badge:
+        bf, blines, bstep = fit_text(d, badge, FONT_BOLD, 150, 120, start=30, minimum=18, max_lines=3)
+        cx, cy, r = W - 150, 220, 105
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=panel_bg)
+        d.ellipse([cx - r + 8, cy - r + 8, cx + r - 8, cy + r - 8], outline=accent, width=4)
+        yy = cy - len(blines) * bstep / 2
+        for line in blines:
+            d.text((cx - d.textlength(line, font=bf) / 2, yy), line, font=bf, fill=text_col)
+            yy += bstep
+    draw_cta(d, H - 250, panel_bg, text_col)
+    return img
+
+
+LAYOUTS = {"panel": (layout_panel, 1), "card": (layout_card, 1), "collage": (layout_collage, 3), "banner": (layout_banner, 1)}
+ORDER = ["panel", "collage", "banner", "card"]
+
+
+def build_image(row, asin, variant=0):
+    pal = PALETTES.get(row.get("category", "").strip().lower(), DEFAULT_PALETTE)
+    name = (row.get("layout") or "").strip().lower()
+    if name not in LAYOUTS:
+        name = ORDER[variant % len(ORDER)]  # rotate so consecutive pins look different
+    fn, n = LAYOUTS[name]
+    query = (row.get("image_query") or "").strip() or row.get("keywords", "").split(",")[0].strip()
+    ids = [i.strip() for i in (row.get("photo_ids") or "").replace("|", ",").split(",") if i.strip()]
+    photos, credits = fetch_photos(query, asin, n, ids)
+    if not photos:  # fallback: plain colour tiles so the bot never stops
+        photos = [Image.new("RGB", (W, H), pal[2])]
+    while len(photos) < n:
+        photos.append(photos[len(photos) % len(photos)])
+    print(f"{asin}: layout={name}, photos={len(credits)}")
+    return fn(photos, row, pal), "; ".join(dict.fromkeys(credits))
 
 
 def description(row, credit=""):
@@ -269,7 +381,7 @@ def main():
             continue
         link = f"https://www.amazon.com/dp/{asin}?tag={TAG}"
         try:
-            img, credit = build_image(row, asin)
+            img, credit = build_image(row, asin, len(posted) + done)
             img.save(OUT_DIR / f"{asin}.jpg", quality=90)
             pin_id = post_pin(row, img, link, credit)
         except Exception as e:  # keep going, report at the end
