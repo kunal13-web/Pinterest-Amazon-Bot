@@ -36,6 +36,7 @@ jobs:
         env:
           PINTEREST_ACCESS_TOKEN: ${{ secrets.PINTEREST_ACCESS_TOKEN }}
           PINTEREST_BOARD_ID: ${{ secrets.PINTEREST_BOARD_ID }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           AMAZON_TAG: ${{ vars.AMAZON_TAG || 'stylenestus-20' }}
           PINS_PER_RUN: ${{ vars.PINS_PER_RUN || '2' }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
