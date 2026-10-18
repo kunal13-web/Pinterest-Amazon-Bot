@@ -4,7 +4,7 @@ from PIL import Image, ImageDraw
 import io
 
 # GitHub Secrets se tokens lena
-PINTEREST_TOKEN = os.getenv("pina_AMA6PTYYADYQ6BYAGCACGDZ2LGSE3IIBQBIQCEGW5RLUEIM4TY2BE4UBA3J5BIJMXX2HBUFTNWW2TKDY6CUDCGFTWWWFJZIA")
+PINTEREST_TOKEN = os.getenv("")
 AMAZON_TAG = os.getenv("stylenestus-20")
 
 def run_automation():
