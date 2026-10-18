@@ -1,0 +1,27 @@
+name: Automated Pinterest Affiliate Posting Bot
+on:
+  schedule:
+    # Yeh cron job roz Indian Time (IST) ke mutabik subah 9:30 baje automatic chalegi
+    - cron: '0 4 * * *'
+  workflow_dispatch: # Iski madad se aap manually jab chahein button daba kar bhi bot chala sakte hain
+
+jobs:
+  run-posting-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Current Repository Code
+        uses: actions/checkout@v3
+
+      - name: Initialize Free Python Server Environment
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Project Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fire Python Script Automation
+        env:
+          PINTEREST_ACCESS_TOKEN: ${{ secrets.PINTEREST_ACCESS_TOKEN }}
+          AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
+        run: python script.py
